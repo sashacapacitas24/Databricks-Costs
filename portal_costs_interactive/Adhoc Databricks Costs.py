@@ -20,7 +20,7 @@ query = QueryDefinition(
         to=end_date
     ),
     dataset=QueryDataset(
-        granularity="Total", 
+        granularity="Daily", 
         aggregation={
             "totalCost": QueryAggregation(
                 name="Cost", 
@@ -55,7 +55,4 @@ for row in result.rows:
 dfDatabricksCosts = pd.DataFrame(rows)
 
 print(dfDatabricksCosts)
-dfDatabricksCosts.to_csv(
-    rf"\\acs09w497.corp.alldata.net\UserFolders\a835877\Documents\Peak 2026\Databricks\csv\Adhoc Databricks Costs.csv", index=False
-)
 
