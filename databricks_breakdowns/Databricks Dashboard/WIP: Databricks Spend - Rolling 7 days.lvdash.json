@@ -1,0 +1,908 @@
+{
+  "datasets": [
+    {
+      "name": "9e31b703",
+      "displayName": "Notebook Usage",
+      "queryLines": [
+        "WITH notebook_usage AS (\r\n",
+        "  SELECT\r\n",
+        "    usage_metadata.notebook_id AS notebook_id,\r\n",
+        "    usage_metadata.notebook_path AS notebook_path,\r\n",
+        "    SUM(usage_quantity) AS total_usage,\r\n",
+        "    identity_metadata.run_as AS user\r\n",
+        "  FROM\r\n",
+        "    system.billing.usage\r\n",
+        "  WHERE\r\n",
+        "    sku_name IN ('PREMIUM_ALL_PURPOSE_SERVERLESS_COMPUTE_US_EAST_2')\r\n",
+        "    AND usage_metadata.job_id IS NULL\r\n",
+        "    AND usage_metadata.notebook_id IS NOT NULL\r\n",
+        "    and usage_date >= current_date() - interval 7 days\r\n",
+        "    and usage_date <= current_date() - interval 1 day\r\n",
+        "  GROUP BY\r\n",
+        "    usage_metadata.notebook_id,\r\n",
+        "    usage_metadata.notebook_path,\r\n",
+        "    identity_metadata.run_as\r\n",
+        ")\r\n",
+        "SELECT\r\n",
+        "  n.notebook_id,\r\n",
+        "  n.notebook_path,\r\n",
+        "  n.user,\r\n",
+        "  (n.total_usage / t.total_usage) * t.total_cost AS notebook_cost\r\n",
+        "FROM\r\n",
+        "  notebook_usage n CROSS JOIN prd.value_stream_monitoring.sku_usage_cost t\r\n",
+        "WHERE\r\n",
+        "  t.sku = 'PREMIUM_ALL_PURPOSE_SERVERLESS_COMPUTE_US_EAST_2'\r\n",
+        "ORDER BY\r\n",
+        "  notebook_cost DESC\r\n",
+        "limit 10"
+      ],
+      "catalog": "prd",
+      "schema": "value_stream_monitoring"
+    },
+    {
+      "name": "33dd8f9f",
+      "displayName": "sku_meter_mapping",
+      "config": {
+        "version": "1.1",
+        "source": "prd.value_stream_monitoring.sku_meter_mapping",
+        "dimensions": [
+          {
+            "expr": "source.*"
+          }
+        ],
+        "measures": [
+          {
+            "name": "count",
+            "expr": "COUNT(*)",
+            "comment": "Represents the total number of rows in the dataset. Use this measure to count all",
+            "displayName": "Count"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ec80d2ab",
+      "displayName": "Job Usage",
+      "queryLines": [
+        "WITH serverless_cost AS (\r\n",
+        "    SELECT\r\n",
+        "        usage_metadata.job_id AS job_id,\r\n",
+        "        workspace_id,\r\n",
+        "        identity_metadata.run_as AS user,\r\n",
+        "        sku_name,\r\n",
+        "        count(DISTINCT usage_metadata.job_run_id) AS execution_count,\r\n",
+        "        sum(usage_quantity) AS total_usage\r\n",
+        "    FROM system.billing.usage\r\n",
+        "    WHERE usage_date >= current_date() - INTERVAL 7 DAYS\r\n",
+        "      AND usage_date <  current_date() - INTERVAL 1 DAY\r\n",
+        "      AND usage_metadata.job_id IS NOT NULL\r\n",
+        "      AND sku_name = 'PREMIUM_JOBS_SERVERLESS_COMPUTE_US_EAST_2'\r\n",
+        "    GROUP BY usage_metadata.job_id, workspace_id, identity_metadata.run_as, sku_name\r\n",
+        "\r\n",
+        "),\r\n",
+        "serverless_job_usage AS (\r\n",
+        "    SELECT\r\n",
+        "        n.job_id,\r\n",
+        "        n.workspace_id,\r\n",
+        "        n.user,\r\n",
+        "        n.sku_name,\r\n",
+        "        n.execution_count,\r\n",
+        "        (n.total_usage / NULLIF(t.total_usage, 0)) * t.total_cost AS total_cost\r\n",
+        "    FROM serverless_cost n\r\n",
+        "    JOIN prd.value_stream_monitoring.sku_usage_cost t\r\n",
+        "      ON t.sku = n.sku_name\r\n",
+        "),\r\n",
+        "\r\n",
+        "managed_cost AS (\r\n",
+        "    SELECT\r\n",
+        "        usage_metadata.job_id AS job_id,\r\n",
+        "        usage_metadata.cluster_id AS cluster_id,\r\n",
+        "        workspace_id,\r\n",
+        "        identity_metadata.run_as AS user,\r\n",
+        "        sku_name,\r\n",
+        "        usage_metadata.node_type AS node_type,\r\n",
+        "        count(DISTINCT usage_metadata.job_run_id) AS execution_count,\r\n",
+        "        sum(usage_quantity) AS total_usage\r\n",
+        "    FROM system.billing.usage\r\n",
+        "    WHERE usage_date >= current_date() - INTERVAL 7 DAYS\r\n",
+        "      AND usage_date <  current_date() - INTERVAL 1 DAY\r\n",
+        "      AND usage_metadata.job_id IS NOT NULL\r\n",
+        "      AND sku_name = 'PREMIUM_JOBS_COMPUTE'\r\n",
+        "    GROUP BY usage_metadata.job_id, usage_metadata.cluster_id, workspace_id,\r\n",
+        "             identity_metadata.run_as, sku_name, usage_metadata.node_type\r\n",
+        "),\r\n",
+        "managed_job_usage AS (\r\n",
+        "    SELECT\r\n",
+        "        n.job_id,\r\n",
+        "        n.workspace_id,\r\n",
+        "        n.user,\r\n",
+        "        n.sku_name,\r\n",
+        "        n.execution_count,\r\n",
+        "        ((n.total_usage / NULLIF(lic.total_usage, 0)) * lic.total_cost)\r\n",
+        "      + ((n.total_usage / NULLIF(infra.total_usage, 0)) * infra.total_cost)\r\n",
+        "        AS total_cost\r\n",
+        "    FROM managed_cost n\r\n",
+        "    JOIN prd.value_stream_monitoring.sku_usage_cost lic\r\n",
+        "      ON lic.sku = n.sku_name\r\n",
+        "    JOIN prd.value_stream_monitoring.meter_node_mapping m\r\n",
+        "      ON n.node_type = m.node_type\r\n",
+        "    JOIN prd.value_stream_monitoring.sku_usage_cost infra\r\n",
+        "      ON infra.sku = m.Meter\r\n",
+        "),\r\n",
+        "\r\n",
+        "combined AS (\r\n",
+        "    SELECT job_id, workspace_id, user, sku_name, execution_count, total_cost FROM serverless_job_usage\r\n",
+        "    UNION ALL\r\n",
+        "    SELECT job_id, workspace_id, user, sku_name, execution_count, total_cost FROM managed_job_usage\r\n",
+        ")\r\n",
+        "\r\n",
+        "SELECT\r\n",
+        "    job_id,\r\n",
+        "    sum(execution_count) AS execution_count,\r\n",
+        "    user,\r\n",
+        "    max(sku_name) AS sku_name,\r\n",
+        "    sum(total_cost) AS total_cost\r\n",
+        "FROM combined\r\n",
+        "GROUP BY job_id, workspace_id, user\r\n",
+        "ORDER BY total_cost DESC\r\n",
+        "LIMIT 10"
+      ],
+      "catalog": "prd",
+      "schema": "value_stream_monitoring"
+    },
+    {
+      "name": "ddbc3027",
+      "displayName": "Databricks Cost Fact",
+      "queryLines": [
+        "with license_cost as( \r\n",
+        "    select Date, Meter, sum(Cost), 'License' as pricing_type from value_stream_monitoring.databricks_costs_daily\r\n",
+        "where Date >= current_date() - interval 7 days\r\n",
+        "and Date <= current_date() - interval 1 day\r\n",
+        "group by Date, Meter, pricing_type),\r\n",
+        "\r\n",
+        "infra_cost as(\r\n",
+        "    select Date, Meter, sum(Cost), 'Infra' as pricing_type from value_stream_monitoring.databricks_infra_costs_daily\r\n",
+        "where Date >= current_date() - interval 7 days\r\n",
+        "and Date <= current_date() - interval 1 day\r\n",
+        "group by Date, Meter, pricing_type\r\n",
+        ")\r\n",
+        "\r\n",
+        "select * from license_cost \r\n",
+        "union all \r\n",
+        "select * from infra_cost\r\n"
+      ]
+    },
+    {
+      "name": "346f69a8",
+      "displayName": "SKU Cost Fact",
+      "queryLines": [
+        "SELECT \r\n",
+        "  CASE WHEN sku LIKE '%PREMIUM%' THEN sku ELSE 'INFRA' END AS sku, \r\n",
+        "  sum(total_cost) as total_cost, \r\n",
+        "  sum(total_cost)/sum(total_usage) as cost_per_dbu\r\n",
+        "FROM value_stream_monitoring.sku_usage_cost\r\n",
+        "group by CASE WHEN sku LIKE '%PREMIUM%' THEN sku ELSE 'INFRA' END\r\n",
+        "order by total_cost desc\r\n"
+      ]
+    },
+    {
+      "name": "ee234277",
+      "displayName": "Warehouse Usage",
+      "queryLines": [
+        "with warehouse_usage as (select \r\n",
+        "  usage_metadata.warehouse_id as warehouse_id,\r\n",
+        "  sku_name, \r\n",
+        "  sum(usage_quantity) as total_usage, \r\n",
+        "  identity_metadata.owned_by as user\r\n",
+        "from system.billing.usage\r\n",
+        "where usage_date >= current_date() - interval 7 days\r\n",
+        "and usage_date <= current_date() - interval 1 day\r\n",
+        "and usage_metadata.warehouse_id is not null\r\n",
+        "group by usage_metadata.warehouse_id,identity_metadata.owned_by ,sku_name, user\r\n",
+        "order by total_usage desc\r\n",
+        ") \r\n",
+        "SELECT\r\n",
+        "  n.warehouse_id,\r\n",
+        "  n.sku_name,\r\n",
+        "  n.user,\r\n",
+        "  (n.total_usage / t.total_usage) * t.total_cost AS warehouse_run_cost\r\n",
+        "FROM\r\n",
+        "  warehouse_usage n CROSS JOIN prd.value_stream_monitoring.sku_usage_cost t\r\n",
+        "WHERE\r\n",
+        "  n.sku_name = t.sku\r\n",
+        "ORDER BY\r\n",
+        "  warehouse_run_cost DESC\r\n",
+        "limit 10"
+      ]
+    },
+    {
+      "name": "a28c907b",
+      "displayName": "Query Usage",
+      "queryLines": [
+        "with total_warehouse_id as (\r\n",
+        "  select\r\n",
+        "    compute.warehouse_id as warehouse_id,\r\n",
+        "    sum(total_duration_ms) as total_query_time,\r\n",
+        "    count(distinct statement_id) as number_of_queries\r\n",
+        "  from system.query.history\r\n",
+        "  where start_time >= current_date() - interval 7 days\r\n",
+        "  and start_time<= current_date() - interval 1 days\r\n",
+        "  group by compute.warehouse_id\r\n",
+        "),\r\n",
+        "total_query_usage as (\r\n",
+        "  select\r\n",
+        "    statement_text,\r\n",
+        "    executed_by as user_name,\r\n",
+        "    compute.warehouse_id as warehouse_id,\r\n",
+        "    sum(total_duration_ms) as total_query_time,\r\n",
+        "    count(distinct start_time) as query_count\r\n",
+        "  from system.query.history\r\n",
+        "  where start_time >= current_date() - interval 7 days\r\n",
+        "  and start_time<= current_date() - interval 1 days\r\n",
+        "  group by statement_text, executed_by, compute.warehouse_id\r\n",
+        "),\r\n",
+        "\r\n",
+        "total_warehouse_usage as (\r\n",
+        "  select\r\n",
+        "    usage_metadata.warehouse_id as warehouse_id,\r\n",
+        "    sku_name,\r\n",
+        "    sum(usage_quantity) as total_usage\r\n",
+        "  from system.billing.usage\r\n",
+        "  where usage_date >= current_date() - interval 7 days\r\n",
+        "  and usage_date<= current_date() - interval 1 days\r\n",
+        "    and usage_metadata.warehouse_id is not null\r\n",
+        "    and sku_name = 'PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST_2'\r\n",
+        "  group by usage_metadata.warehouse_id, sku_name\r\n",
+        "),\r\n",
+        "\r\n",
+        "warehouse_cost as (\r\n",
+        "  select\r\n",
+        "    n.warehouse_id,\r\n",
+        "    (n.total_usage / c.total_usage) * c.total_cost as warehouse_run_cost\r\n",
+        "  from total_warehouse_usage n\r\n",
+        "  join prd.value_stream_monitoring.sku_usage_cost c\r\n",
+        "    on n.sku_name = c.sku\r\n",
+        ")\r\n",
+        "\r\n",
+        "select\r\n",
+        "  q.statement_text,\r\n",
+        "  q.user_name,\r\n",
+        "  q.warehouse_id,\r\n",
+        "  sum(q.query_count) as query_count,\r\n",
+        "  sum((q.total_query_time / t.total_query_time) * w.warehouse_run_cost) as query_cost\r\n",
+        "from total_query_usage q\r\n",
+        "join total_warehouse_id t\r\n",
+        "  on q.warehouse_id = t.warehouse_id\r\n",
+        "join warehouse_cost w\r\n",
+        "  on q.warehouse_id = w.warehouse_id\r\n",
+        "group by q.statement_text, q.user_name, q.warehouse_id\r\n",
+        "order by query_cost desc\r\n",
+        "limit 10\r\n"
+      ]
+    },
+    {
+      "name": "8b415133",
+      "displayName": "User Usage",
+      "queryLines": [
+        "select usage_date , count(distinct identity_metadata.run_as) as total_users\r\n",
+        "from system.billing.usage\r\n",
+        "where usage_date >= current_date() - interval 7 days\r\n",
+        "and usage_date <= current_date() - interval 1 days\r\n",
+        "group by  usage_date\r\n",
+        "order by usage_date"
+      ]
+    },
+    {
+      "name": "af30341e",
+      "displayName": "meter_node_mapping",
+      "config": {
+        "version": "1.1",
+        "source": "prd.value_stream_monitoring.meter_node_mapping",
+        "dimensions": [
+          {
+            "expr": "source.*"
+          }
+        ],
+        "measures": [
+          {
+            "name": "count",
+            "expr": "COUNT(*)",
+            "comment": "Represents the total number of rows in the dataset. Use this measure to count all",
+            "displayName": "Count"
+          }
+        ]
+      }
+    }
+  ],
+  "relationshipGraphs": [
+    {
+      "sources": [
+        {
+          "name": "Notebook_Usage",
+          "datasetName": "9e31b703"
+        },
+        {
+          "name": "sku_meter_mapping",
+          "datasetName": "33dd8f9f"
+        },
+        {
+          "name": "Job_Usage",
+          "datasetName": "ec80d2ab"
+        },
+        {
+          "name": "Databricks_Cost_Fact",
+          "datasetName": "ddbc3027"
+        },
+        {
+          "name": "SKU_Cost_Fact",
+          "datasetName": "346f69a8"
+        },
+        {
+          "name": "Warehouse_Usage",
+          "datasetName": "ee234277"
+        },
+        {
+          "name": "Query_Usage",
+          "datasetName": "a28c907b"
+        },
+        {
+          "name": "User_Usage",
+          "datasetName": "8b415133"
+        },
+        {
+          "name": "meter_node_mapping",
+          "datasetName": "af30341e"
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "75dec7de",
+      "displayName": "Cost Breakdown",
+      "layout": [
+        {
+          "widget": {
+            "name": "f260428a",
+            "multilineTextboxSpec": {
+              "lines": [
+                ""
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 21,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "top",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "9e31b703",
+                  "fields": [
+                    {
+                      "name": "notebook_path",
+                      "expression": "`notebook_path`"
+                    },
+                    {
+                      "name": "notebook_cost",
+                      "expression": "`notebook_cost`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "Top 10 Notebooks by Spend- Last 7 days"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "notebook_path",
+                    "columnWidth": 500,
+                    "style": {
+                      "type": "basic",
+                      "rules": [
+                        {
+                          "condition": {
+                            "operator": "="
+                          },
+                          "backgroundColor": "#00A972"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "notebook_cost",
+                    "format": {
+                      "type": "number-currency",
+                      "currencyCode": "USD",
+                      "abbreviation": "none",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 2
+                      },
+                      "hideGroupSeparator": true
+                    }
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 13,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "895d7778",
+            "multilineTextboxSpec": {
+              "lines": [
+                ""
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "top-1",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Job_Usage__job_id",
+                      "expression": "`Job_Usage`.`job_id`"
+                    },
+                    {
+                      "name": "Job_Usage__user",
+                      "expression": "`Job_Usage`.`user`"
+                    },
+                    {
+                      "name": "Job_Usage__execution_count",
+                      "expression": "`Job_Usage`.`execution_count`"
+                    },
+                    {
+                      "name": "Job_Usage__total_cost",
+                      "expression": "`Job_Usage`.`total_cost`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Top 10 Jobs by Spend - Last 7 days",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Job_Usage__job_id"
+                  },
+                  {
+                    "fieldName": "Job_Usage__user",
+                    "columnWidth": 200
+                  },
+                  {
+                    "fieldName": "Job_Usage__execution_count"
+                  },
+                  {
+                    "fieldName": "Job_Usage__total_cost",
+                    "format": {
+                      "type": "number-currency",
+                      "currencyCode": "USD",
+                      "abbreviation": "none",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 2
+                      },
+                      "hideGroupSeparator": true
+                    }
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 4,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "azure-portal-s",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "daily(Databricks_Cost_Fact__Date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `Databricks_Cost_Fact`.`Date`)"
+                    },
+                    {
+                      "name": "sum(Databricks_Cost_Fact__sum(Cost))",
+                      "expression": "SUM(`Databricks_Cost_Fact`.`sum(Cost)`)"
+                    },
+                    {
+                      "name": "Databricks_Cost_Fact__pricing_type",
+                      "expression": "`Databricks_Cost_Fact`.`pricing_type`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "facet": {
+                "type": "wrap",
+                "fieldName": "Databricks_Cost_Fact__pricing_type",
+                "scale": {
+                  "type": "categorical"
+                }
+              },
+              "version": 3,
+              "frame": {
+                "showTitle": true,
+                "title": "Azure Portal Spend - split by managed resources and packaged databricks spend"
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "daily(Databricks_Cost_Fact__Date)",
+                  "format": {
+                    "type": "date",
+                    "date": "locale-short-month"
+                  },
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(Databricks_Cost_Fact__sum(Cost))",
+                  "axis": {
+                    "title": "Total Spend"
+                  },
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 8,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "weekly-cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "SKU_Cost_Fact__sku",
+                      "expression": "`SKU_Cost_Fact`.`sku`"
+                    },
+                    {
+                      "name": "SKU_Cost_Fact__total_cost",
+                      "expression": "`SKU_Cost_Fact`.`total_cost`"
+                    },
+                    {
+                      "name": "SKU_Cost_Fact__cost_per_dbu",
+                      "expression": "`SKU_Cost_Fact`.`cost_per_dbu`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Weekly Cost Breakdown by SKU",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "SKU_Cost_Fact__sku"
+                  },
+                  {
+                    "fieldName": "SKU_Cost_Fact__total_cost",
+                    "format": {
+                      "type": "number-currency",
+                      "currencyCode": "USD",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 0
+                      },
+                      "hideGroupSeparator": true
+                    },
+                    "contentAlignment": "right"
+                  },
+                  {
+                    "fieldName": "SKU_Cost_Fact__cost_per_dbu",
+                    "format": {
+                      "type": "number-currency",
+                      "currencyCode": "USD",
+                      "abbreviation": "none",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      },
+                      "hideGroupSeparator": true
+                    }
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 7,
+            "width": 4,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "top-2",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ee234277",
+                  "fields": [
+                    {
+                      "name": "warehouse_id",
+                      "expression": "`warehouse_id`"
+                    },
+                    {
+                      "name": "user",
+                      "expression": "`user`"
+                    },
+                    {
+                      "name": "warehouse_run_cost",
+                      "expression": "`warehouse_run_cost`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "Top 10 SQL Warehouses by Spend - Last 7 days"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "warehouse_id"
+                  },
+                  {
+                    "fieldName": "user"
+                  },
+                  {
+                    "fieldName": "warehouse_run_cost",
+                    "format": {
+                      "type": "number-currency",
+                      "currencyCode": "USD",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 2
+                      },
+                      "hideGroupSeparator": true
+                    }
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 7,
+            "width": 4,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "top-10-queries",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Query_Usage__statement_text",
+                      "expression": "`Query_Usage`.`statement_text`"
+                    },
+                    {
+                      "name": "Query_Usage__user_name",
+                      "expression": "`Query_Usage`.`user_name`"
+                    },
+                    {
+                      "name": "Query_Usage__query_count",
+                      "expression": "`Query_Usage`.`query_count`"
+                    },
+                    {
+                      "name": "Query_Usage__query_cost",
+                      "expression": "`Query_Usage`.`query_cost`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "Top 10 Serverless Queries by Spend - Last 7 days"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Query_Usage__statement_text"
+                  },
+                  {
+                    "fieldName": "Query_Usage__user_name"
+                  },
+                  {
+                    "fieldName": "Query_Usage__query_count"
+                  },
+                  {
+                    "fieldName": "Query_Usage__query_cost",
+                    "format": {
+                      "type": "number-currency",
+                      "currencyCode": "USD",
+                      "abbreviation": "none",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 2
+                      },
+                      "hideGroupSeparator": true
+                    }
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "distinct",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "daily(User_Usage__usage_date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `User_Usage`.`usage_date`)"
+                    },
+                    {
+                      "name": "sum(User_Usage__total_users)",
+                      "expression": "SUM(`User_Usage`.`total_users`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "showTitle": true,
+                "title": "Distinct Daily Users"
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "daily(User_Usage__usage_date)",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(User_Usage__total_users)",
+                  "displayName": "Distinct Users",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 0,
+            "width": 4,
+            "height": 7
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}
